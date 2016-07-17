@@ -2,8 +2,8 @@
 
 namespace App\Models;
 
+use App\Events\SongLikeToggled;
 use App\Traits\CanFilterByUser;
-use DB;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -21,7 +21,7 @@ class Interaction extends Model
 
     protected $guarded = ['id'];
 
-    protected $hidden = ['user_id', 'created_at', 'updated_at'];
+    protected $hidden = ['id', 'user_id', 'created_at', 'updated_at'];
 
     public function user()
     {
@@ -35,17 +35,17 @@ class Interaction extends Model
 
     /**
      * Increase the number of times a song is played by a user.
-     * 
-     * @param string   $songId
-     * @param int|null $userId
+     *
+     * @param string $songId
+     * @param User   $user
      *
      * @return Interaction
      */
-    public static function increasePlayCount($songId, $userId = null)
+    public static function increasePlayCount($songId, User $user)
     {
         $interaction = self::firstOrCreate([
             'song_id' => $songId,
-            'user_id' => $userId ?: auth()->user()->id,
+            'user_id' => $user->id,
         ]);
 
         if (!$interaction->exists) {
@@ -60,17 +60,17 @@ class Interaction extends Model
 
     /**
      * Like or unlike a song on behalf of a user.
-     * 
-     * @param string   $songId
-     * @param int|null $userId
+     *
+     * @param string $songId
+     * @param User   $user
      *
      * @return Interaction
      */
-    public static function toggleLike($songId, $userId = null)
+    public static function toggleLike($songId, User $user)
     {
         $interaction = self::firstOrCreate([
             'song_id' => $songId,
-            'user_id' => $userId ?: auth()->user()->id,
+            'user_id' => $user->id,
         ]);
 
         if (!$interaction->exists) {
@@ -80,25 +80,27 @@ class Interaction extends Model
         $interaction->liked = !$interaction->liked;
         $interaction->save();
 
+        event(new SongLikeToggled($interaction));
+
         return $interaction;
     }
 
     /**
      * Like several songs at once.
      *
-     * @param array    $songIds
-     * @param int|null $userId
+     * @param array $songIds
+     * @param User  $user
      *
      * @return array
      */
-    public static function batchLike(array $songIds, $userId = null)
+    public static function batchLike(array $songIds, User $user)
     {
         $result = [];
 
         foreach ($songIds as $songId) {
             $interaction = self::firstOrCreate([
                 'song_id' => $songId,
-                'user_id' => $userId ?: auth()->user()->id,
+                'user_id' => $user->id,
             ]);
 
             if (!$interaction->exists) {
@@ -107,6 +109,8 @@ class Interaction extends Model
 
             $interaction->liked = true;
             $interaction->save();
+
+            event(new SongLikeToggled($interaction));
 
             $result[] = $interaction;
         }
@@ -117,16 +121,18 @@ class Interaction extends Model
     /**
      * Unlike several songs at once.
      *
-     * @param array    $songIds
-     * @param int|null $userId
+     * @param array $songIds
+     * @param User  $user
      *
      * @return int
      */
-    public static function batchUnlike(array $songIds, $userId = null)
+    public static function batchUnlike(array $songIds, User $user)
     {
-        return DB::table('interactions')
-            ->whereIn('song_id', $songIds)
-            ->where('user_id', $userId ?: auth()->user()->id)
-            ->update(['liked' => false]);
+        foreach (self::whereIn('song_id', $songIds)->whereUserId($user->id)->get() as $interaction) {
+            $interaction->liked = false;
+            $interaction->save();
+
+            event(new SongLikeToggled($interaction));
+        }
     }
 }

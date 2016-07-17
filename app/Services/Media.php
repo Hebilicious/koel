@@ -3,40 +3,66 @@
 namespace App\Services;
 
 use App\Console\Commands\SyncMedia;
+use App\Events\LibraryChanged;
+use App\Libraries\WatchRecord\WatchRecordInterface;
 use App\Models\Album;
 use App\Models\Artist;
+use App\Models\File;
 use App\Models\Setting;
 use App\Models\Song;
-use Exception;
 use getID3;
-use getid3_lib;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\Finder\Finder;
-use Symfony\Component\Finder\SplFileInfo;
 
 class Media
 {
     /**
-     * @var getID3
+     * All applicable tags in a media file that we cater for.
+     * Note that each isn't necessarily a valid ID3 tag name.
+     *
+     * @var array
      */
-    protected $getID3;
+    protected $allTags = [
+        'artist',
+        'album',
+        'title',
+        'length',
+        'track',
+        'lyrics',
+        'cover',
+        'mtime',
+        'compilation',
+    ];
+
+    /**
+     * Tags to be synced.
+     *
+     * @var array
+     */
+    protected $tags = [];
 
     public function __construct()
     {
-        $this->setGetID3();
     }
 
     /**
      * Sync the media. Oh sync the media.
      *
      * @param string|null $path
+     * @param array       $tags        The tags to sync.
+     *                                 Only taken into account for existing records.
+     *                                 New records will have all tags synced in regardless.
+     * @param bool        $force       Whether to force syncing even unchanged files
      * @param SyncMedia   $syncCommand The SyncMedia command object, to log to console if executed by artisan.
      */
-    public function sync($path = null, SyncMedia $syncCommand = null)
+    public function sync($path = null, $tags = [], $force = false, SyncMedia $syncCommand = null)
     {
-        set_time_limit(env('APP_MAX_SCAN_TIME', 600));
+        if (!app()->runningInConsole()) {
+            set_time_limit(env('APP_MAX_SCAN_TIME', 600));
+        }
 
         $path = $path ?: Setting::get('media_path');
+        $this->setTags($tags);
 
         $results = [
             'good' => [], // Updated or added files
@@ -44,12 +70,12 @@ class Media
             'ugly' => [], // Unmodified files
         ];
 
-        // For now we only care about mp3 and ogg files.
-        // Support for other formats (AAC?) may be added in the future.
-        $files = Finder::create()->files()->name('/\.(mp3|ogg)$/')->in($path);
+        $getID3 = new getID3();
 
-        foreach ($files as $file) {
-            $song = $this->syncFile($file);
+        foreach ($this->gatherFiles($path) as $file) {
+            $file = new File($file, $getID3);
+
+            $song = $file->sync($this->tags, $force);
 
             if ($song === true) {
                 $results['ugly'][] = $file;
@@ -60,147 +86,109 @@ class Media
             }
 
             if ($syncCommand) {
-                $syncCommand->logToConsole($file->getPathname(), $song);
+                $syncCommand->logToConsole($file->getPath(), $song);
             }
         }
 
         // Delete non-existing songs.
         $hashes = array_map(function ($f) {
-            return $this->getHash($f->getPathname());
+            return self::getHash($f->getPath());
         }, array_merge($results['ugly'], $results['good']));
 
         Song::whereNotIn('id', $hashes)->delete();
 
-        // Empty albums and artists should be gone as well.
-        $inUseAlbums = Song::select('album_id')->groupBy('album_id')->get()->lists('album_id');
-        $inUseAlbums[] = Album::UNKNOWN_ID;
-        Album::whereNotIn('id', $inUseAlbums)->delete();
-
-        $inUseArtists = Album::select('artist_id')->groupBy('artist_id')->get()->lists('artist_id');
-        $inUseArtists[] = Artist::UNKNOWN_ID;
-        Artist::whereNotIn('id', $inUseArtists)->delete();
+        // Trigger LibraryChanged, so that TidyLibrary handler is fired to, erm, tidy our library.
+        event(new LibraryChanged());
     }
 
     /**
-     * Sync a song with all available media info against the database.
+     * Gather all applicable files in a given directory.
      *
-     * @param SplFileInfo $file The SplFileInfo instance of the file.
+     * @param string $path The directory's full path
      *
-     * @return bool|Song A Song object on success,
-     *                   true if file exists but is unmodified,
-     *                   or false on an error.
+     * @return array An array of SplFileInfo objects
      */
-    public function syncFile(SplFileInfo $file)
+    public function gatherFiles($path)
     {
-        if (!$info = $this->getInfo($file)) {
-            return false;
-        }
+        return Finder::create()
+            ->ignoreUnreadableDirs()
+            ->files()
+            ->name('/\.(mp3|ogg|m4a|flac)$/i')
+            ->in($path);
+    }
 
-        if (!$this->isNewOrChanged($file)) {
-            return true;
-        }
+    /**
+     * Sync media using a watch record.
+     *
+     * @param WatchRecordInterface $record      The watch record.
+     * @param SyncMedia|null       $syncCommand The SyncMedia command object, to log to console if executed by artisan.
+     */
+    public function syncByWatchRecord(WatchRecordInterface $record, SyncMedia $syncCommand = null)
+    {
+        Log::info("New watch record received: '$record'");
+        $path = $record->getPath();
 
-        $artist = Artist::get($info['artist']);
-        $album = Album::get($artist, $info['album']);
+        if ($record->isFile()) {
+            Log::info("'$path' is a file.");
 
-        if ($info['cover'] && !$album->has_cover) {
-            try {
-                $album->generateCover($info['cover']);
-            } catch (Exception $e) {
-                Log::error($e);
+            // If the file has been deleted...
+            if ($record->isDeleted()) {
+                // ...and it has a record in our database, remove it.
+                if ($song = Song::byPath($path)) {
+                    $song->delete();
+
+                    Log::info("$path deleted.");
+
+                    event(new LibraryChanged());
+                } else {
+                    Log::info("$path doesn't exist in our database--skipping.");
+                }
             }
-        }
+            // Otherwise, it's a new or changed file. Try to sync it in.
+            // File format etc. will be handled by File::sync().
+            elseif ($record->isNewOrModified()) {
+                $result = (new File($path))->sync($this->tags);
+                Log::info($result instanceof Song ? "Synchronized $path" : "Invalid file $path");
+            }
 
-        $info['album_id'] = $album->id;
-
-        unset($info['artist']);
-        unset($info['album']);
-        unset($info['cover']);
-
-        $song = Song::updateOrCreate(['id' => $this->getHash($file->getPathname())], $info);
-        $song->save();
-
-        return $song;
-    }
-
-    /**
-     * Check if a media file is new or changed.
-     * A file is considered existing and unchanged only when:
-     * - its hash (ID) can be found in the database, and
-     * - its last modified time is the same with that of the comparing file.
-     *
-     * @param SplFileInfo $file
-     *
-     * @return bool
-     */
-    protected function isNewOrChanged(SplFileInfo $file)
-    {
-        return !Song::whereIdAndMtime($this->getHash($file->getPathname()), $file->getMTime())->count();
-    }
-
-    /**
-     * Get ID3 info from a file.
-     *
-     * @param SplFileInfo $file
-     *
-     * @return array|null
-     */
-    public function getInfo(SplFileInfo $file)
-    {
-        $info = $this->getID3->analyze($file->getPathname());
-
-        if (isset($info['error'])) {
             return;
         }
 
-        // Copy the available tags over to comment.
-        // This is a helper from getID3, though it doesn't really work well.
-        // We'll still prefer getting ID3v2 tags directly later.
-        // Read on.
-        getid3_lib::CopyTagsToComments($info);
+        // Record is a directory.
+        Log::info("'$path' is a directory.");
 
-        if (!isset($info['playtime_seconds'])) {
-            return;
+        if ($record->isDeleted()) {
+            // The directory is removed. We remove all songs in it.
+            if ($count = Song::inDirectory($path)->delete()) {
+                Log::info("Deleted $count song(s) under $path");
+                event(new LibraryChanged());
+            } else {
+                Log::info("$path is empty--no action needed.");
+            }
+        } elseif ($record->isNewOrModified()) {
+            foreach ($this->gatherFiles($path) as $file) {
+                (new File($file))->sync($this->tags);
+            }
+
+            Log::info("Synced all song(s) under $path");
         }
+    }
 
-        $props = [
-            'artist' => '',
-            'album' => '',
-            'title' => '',
-            'length' => $info['playtime_seconds'],
-            'lyrics' => '',
-            'cover' => array_get($info, 'comments.picture', [null])[0],
-            'path' => $file->getPathname(),
-            'mtime' => $file->getMTime(),
-        ];
+    /**
+     * Construct an array of tags to be synced into the database from an input array of tags.
+     * If the input array is empty or contains only invalid items, we use all tags.
+     * Otherwise, we only use the valid items it it.
+     *
+     * @param array $tags
+     */
+    public function setTags($tags = [])
+    {
+        $this->tags = array_intersect((array) $tags, $this->allTags) ?: $this->allTags;
 
-        if (!$comments = array_get($info, 'comments_html')) {
-            return $props;
+        // We always keep track of mtime.
+        if (!in_array('mtime', $this->tags)) {
+            $this->tags[] = 'mtime';
         }
-
-        // We prefer id3v2 tags over others.
-        if (!$artist = array_get($info, 'tags.id3v2.artist', [null])[0]) {
-            $artist = array_get($comments, 'artist', [''])[0];
-        }
-
-        if (!$album = array_get($info, 'tags.id3v2.album', [null])[0]) {
-            $album = array_get($comments, 'album', [''])[0];
-        }
-
-        if (!$title = array_get($info, 'tags.id3v2.title', [null])[0]) {
-            $title = array_get($comments, 'title', [''])[0];
-        }
-
-        if (!$lyrics = array_get($info, 'tags.id3v2.unsynchronised_lyric', [null])[0]) {
-            $lyrics = array_get($comments, 'unsynchronised_lyric', [''])[0];
-        }
-
-        $props['artist'] = trim($artist);
-        $props['album'] = trim($album);
-        $props['title'] = trim($title);
-        $props['lyrics'] = trim($lyrics);
-
-        return $props;
     }
 
     /**
@@ -212,22 +200,31 @@ class Media
      */
     public function getHash($path)
     {
-        return md5(config('app.key').$path);
+        return File::getHash($path);
     }
 
     /**
-     * @return getID3
+     * Tidy up the library by deleting empty albums and artists.
      */
-    public function getGetID3()
+    public function tidy()
     {
-        return $this->getID3;
-    }
+        $inUseAlbums = Song::select('album_id')->groupBy('album_id')->get()->lists('album_id')->toArray();
+        $inUseAlbums[] = Album::UNKNOWN_ID;
+        Album::whereNotIn('id', $inUseAlbums)->delete();
 
-    /**
-     * @param getID3 $getID3
-     */
-    public function setGetID3($getID3 = null)
-    {
-        $this->getID3 = $getID3 ?: new getID3();
+        $inUseArtists = Album::select('artist_id')->groupBy('artist_id')->get()->lists('artist_id')->toArray();
+
+        $contributingArtists = Song::distinct()
+            ->select('contributing_artist_id')
+            ->groupBy('contributing_artist_id')
+            ->get()
+            ->lists('contributing_artist_id')
+            ->toArray();
+
+        $inUseArtists = array_merge($inUseArtists, $contributingArtists);
+        $inUseArtists[] = Artist::UNKNOWN_ID;
+        $inUseArtists[] = Artist::VARIOUS_ID;
+
+        Artist::whereNotIn('id', array_filter($inUseArtists))->delete();
     }
 }

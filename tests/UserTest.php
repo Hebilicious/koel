@@ -11,14 +11,13 @@ class UserTest extends TestCase
     public function testCreateUser()
     {
         // Non-admins can't do shit
-        $response = $this->actingAs(factory(User::class)->create())
-            ->call('post', 'api/user', [
+        $this->actingAs(factory(User::class)->create())
+            ->post('api/user', [
                 'name' => 'Foo',
                 'email' => 'bar@baz.com',
                 'password' => 'qux',
-            ]);
-
-        $this->assertEquals(403, $response->status());
+            ])
+            ->seeStatusCode(403);
 
         // But admins can
         $this->actingAs(factory(User::class, 'admin')->create())
@@ -29,16 +28,6 @@ class UserTest extends TestCase
             ]);
 
         $this->seeInDatabase('users', ['name' => 'Foo']);
-    }
-
-    public function testUpdateProfile()
-    {
-        $user = factory(User::class)->create();
-
-        $this->actingAs($user)
-            ->put('api/me', ['name' => 'Foo', 'email' => 'bar@baz.com']);
-
-        $this->seeInDatabase('users', ['name' => 'Foo', 'email' => 'bar@baz.com']);
     }
 
     public function testUpdateUser()
@@ -58,9 +47,28 @@ class UserTest extends TestCase
     public function testDeleteUser()
     {
         $user = factory(User::class)->create();
-        $this->actingAs(factory(User::class, 'admin')->create())
-            ->delete("api/user/{$user->id}");
+        $admin = factory(User::class, 'admin')->create();
 
-        $this->notSeeInDatabase('users', ['id' => $user->id]);
+        $this->actingAs($admin)
+            ->delete("api/user/{$user->id}")
+            ->notSeeInDatabase('users', ['id' => $user->id]);
+
+        // A user can't delete himself
+        $this->actingAs($admin)
+            ->delete("api/user/{$admin->id}")
+            ->seeStatusCode(403)
+            ->seeInDatabase('users', ['id' => $admin->id]);
+    }
+
+    public function testUserPreferences()
+    {
+        $user = factory(User::class)->create();
+        $this->assertNull($user->getPreference('foo'));
+
+        $user->setPreference('foo', 'bar');
+        $this->assertEquals('bar', $user->getPreference('foo'));
+
+        $user->deletePreference('foo');
+        $this->assertNull($user->getPreference('foo'));
     }
 }

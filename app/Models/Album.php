@@ -2,12 +2,17 @@
 
 namespace App\Models;
 
+use App\Facades\Lastfm;
 use Illuminate\Database\Eloquent\Model;
 
 /**
- * @property string cover       The path to the album's cover
- * @property bool   has_cover   If the album has a cover image
+ * @property string cover           The path to the album's cover
+ * @property bool   has_cover       If the album has a cover image
  * @property int    id
+ * @property string name            Name of the album
+ * @property bool   is_compilation  If the album is a compilation from multiple artists
+ * @property Artist artist          The album's artist
+ * @property int    artist_id
  */
 class Album extends Model
 {
@@ -17,6 +22,7 @@ class Album extends Model
 
     protected $guarded = ['id'];
     protected $hidden = ['created_at', 'updated_at'];
+    protected $casts = ['artist_id' => 'integer'];
 
     public function artist()
     {
@@ -28,25 +34,58 @@ class Album extends Model
         return $this->hasMany(Song::class);
     }
 
+    public function isUnknown()
+    {
+        return $this->id === self::UNKNOWN_ID;
+    }
+
     /**
      * Get an album using some provided information.
      *
      * @param Artist $artist
-     * @param        $name
+     * @param string $name
+     * @param bool   $isCompilation
      *
      * @return self
      */
-    public static function get(Artist $artist, $name)
+    public static function get(Artist $artist, $name, $isCompilation = false)
     {
-        // If an empty name is provided, turn it into our "Unknown Album"
-        $name = $name ?: self::UNKNOWN_NAME;
+        // If this is a compilation album, its artist must be "Various Artists"
+        if ($isCompilation) {
+            $artist = Artist::getVarious();
+        }
 
-        $album = self::firstOrCreate([
+        return self::firstOrCreate([
             'artist_id' => $artist->id,
-            'name' => $name,
+            'name' => $name ?: self::UNKNOWN_NAME,
         ]);
+    }
 
-        return $album;
+    /**
+     * Get extra information about the album from Last.fm.
+     *
+     * @return array|false
+     */
+    public function getInfo()
+    {
+        if ($this->isUnknown()) {
+            return false;
+        }
+
+        $info = Lastfm::getAlbumInfo($this->name, $this->artist->name);
+
+        // If our current album has no cover, and Last.fm has one, why don't we steal it?
+        // Great artists steal for their great albums!
+        if (!$this->has_cover &&
+            is_string($image = array_get($info, 'image')) &&
+            ini_get('allow_url_fopen')
+        ) {
+            $extension = explode('.', $image);
+            $this->writeCoverFile(file_get_contents($image), last($extension));
+            $info['cover'] = $this->cover;
+        }
+
+        return $info;
     }
 
     /**
@@ -68,10 +107,24 @@ class Album extends Model
     public function generateCover(array $cover)
     {
         $extension = explode('/', $cover['image_mime']);
-        $fileName = uniqid().'.'.strtolower($extension[1]);
-        $coverPath = app()->publicPath().'/img/covers/'.$fileName;
+        $extension = empty($extension[1]) ? 'png' : $extension[1];
 
-        file_put_contents($coverPath, $cover['data']);
+        $this->writeCoverFile($cover['data'], $extension);
+    }
+
+    /**
+     * Write a cover image file with binary data and update the Album with the new cover file.
+     *
+     * @param string $binaryData
+     * @param string $extension  The file extension
+     */
+    public function writeCoverFile($binaryData, $extension)
+    {
+        $extension = trim(strtolower($extension), '. ');
+        $fileName = uniqid().".$extension";
+        $coverPath = app()->publicPath().'/public/img/covers/'.$fileName;
+
+        file_put_contents($coverPath, $binaryData);
 
         $this->update(['cover' => $fileName]);
     }
@@ -83,7 +136,7 @@ class Album extends Model
 
     public function getCoverAttribute($value)
     {
-        return '/public/img/covers/'.($value ?: self::UNKNOWN_COVER);
+        return app()->staticUrl('public/img/covers/'.($value ?: self::UNKNOWN_COVER));
     }
 
     /**
@@ -101,9 +154,21 @@ class Album extends Model
      * This makes sure they are always sane.
      *
      * @param $value
+     *
+     * @return string
      */
-    public function setNameAttribute($value)
+    public function getNameAttribute($value)
     {
-        $this->attributes['name'] = html_entity_decode($value);
+        return html_entity_decode($value);
+    }
+
+    /**
+     * Determine if the album is a compilation.
+     *
+     * @return bool
+     */
+    public function getIsCompilationAttribute()
+    {
+        return $this->artist_id === Artist::VARIOUS_ID;
     }
 }

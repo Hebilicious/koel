@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\API;
 
-use App\Http\Requests\API\ProfileUpdateRequest;
 use App\Http\Requests\API\UserStoreRequest;
 use App\Http\Requests\API\UserUpdateRequest;
 use App\Models\User;
@@ -30,11 +29,11 @@ class UserController extends Controller
      * Update a user.
      *
      * @param UserUpdateRequest $request
-     * @param int               $id
+     * @param User              $user
      *
      * @return \Illuminate\Http\JsonResponse
      */
-    public function update(UserUpdateRequest $request, $id)
+    public function update(UserUpdateRequest $request, User $user)
     {
         $data = $request->only('name', 'email');
 
@@ -42,40 +41,20 @@ class UserController extends Controller
             $data['password'] = Hash::make($password);
         }
 
-        return response()->json(User::findOrFail($id)->update($data));
+        return response()->json($user->update($data));
     }
 
     /**
      * Delete a user.
      *
-     * @param int $id
+     * @param User $user
      *
      * @return \Illuminate\Http\JsonResponse
      */
-    public function destroy($id)
+    public function destroy(User $user)
     {
-        if (!auth()->user()->is_admin || auth()->user()->id === $id) {
-            abort(403);
-        }
+        $this->authorize($user);
 
-        return response()->json(User::destroy($id));
-    }
-
-    /**
-     * Update the current user's profile.
-     * 
-     * @param ProfileUpdateRequest $request
-     *
-     * @return \Illuminate\Http\JsonResponse
-     */
-    public function updateProfile(ProfileUpdateRequest $request)
-    {
-        $data = $request->only('name', 'email');
-
-        if ($password = $request->input('password')) {
-            $data['password'] = Hash::make($password);
-        }
-
-        return response()->json(auth()->user()->update($data));
+        return response()->json($user->delete());
     }
 }

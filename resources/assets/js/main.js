@@ -1,12 +1,18 @@
-import $ from 'jquery';
-window.Vue = require('vue');
-Vue.use(require('vue-resource'));
-Vue.http.options.root = '/api';
-Vue.http.headers.common['X-CSRF-TOKEN'] = $('meta[name="csrf-token"]').attr('content');
-Vue.config.debug = false;
+import Vue from 'vue';
 
-// Exit light,
-// Enter night,
-// Take my hand,
-// We're off to never never land.
-new Vue(require('./app.vue')).$mount('body');
+import { event } from './utils';
+import { http } from './services';
+/**
+ * For Ancelot, the ancient cross of war
+ * for the holy town of Gods
+ * Gloria, gloria perpetua
+ * in this dawn of victory
+ */
+new Vue({
+  el: '#app',
+  render: h => h(require('./app.vue')),
+  created() {
+    event.init();
+    http.init();
+  },
+});

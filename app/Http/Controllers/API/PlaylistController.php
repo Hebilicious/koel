@@ -9,6 +9,16 @@ use Illuminate\Http\Request;
 class PlaylistController extends Controller
 {
     /**
+     * Gets all playlists by the current user.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function index()
+    {
+        return response()->json(Playlist::byCurrentUser()->orderBy('name')->with('songs')->get());
+    }
+
+    /**
      * Create a new playlist.
      *
      * @param PlaylistStoreRequest $request
@@ -18,9 +28,9 @@ class PlaylistController extends Controller
     public function store(PlaylistStoreRequest $request)
     {
         $playlist = auth()->user()->playlists()->create($request->only('name'));
-        $playlist->songs()->sync($request->input('songs'));
+        $playlist->songs()->sync($request->input('songs', []));
 
-        $playlist->songs = $playlist->songs->fetch('id');
+        $playlist->songs = $playlist->songs->pluck('id');
 
         return response()->json($playlist);
     }
@@ -29,20 +39,15 @@ class PlaylistController extends Controller
      * Rename a playlist.
      *
      * @param \Illuminate\Http\Request $request
-     * @param int                      $id
+     * @param Playlist                 $playlist
      *
      * @return \Illuminate\Http\JsonResponse
      */
-    public function update(Request $request, $id)
+    public function update(Request $request, Playlist $playlist)
     {
-        $playlist = Playlist::findOrFail($id);
+        $this->authorize('owner', $playlist);
 
-        if ($playlist->user_id !== auth()->user()->id) {
-            abort(403);
-        }
-
-        $playlist->name = $request->input('name');
-        $playlist->save();
+        $playlist->update($request->only('name'));
 
         return response()->json($playlist);
     }
@@ -52,17 +57,13 @@ class PlaylistController extends Controller
      * Any songs that are not populated here will be removed from the playlist.
      *
      * @param \Illuminate\Http\Request $request
-     * @param int                      $id
+     * @param Playlist                 $playlist
      *
      * @return \Illuminate\Http\JsonResponse
      */
-    public function sync(Request $request, $id)
+    public function sync(Request $request, Playlist $playlist)
     {
-        $playlist = Playlist::findOrFail($id);
-
-        if ($playlist->user_id !== auth()->user()->id) {
-            abort(403);
-        }
+        $this->authorize('owner', $playlist);
 
         $playlist->songs()->sync($request->input('songs'));
 
@@ -72,18 +73,15 @@ class PlaylistController extends Controller
     /**
      * Delete a playlist.
      *
-     * @param int $id
+     * @param Playlist $playlist
      *
      * @return \Illuminate\Http\JsonResponse
      */
-    public function destroy($id)
+    public function destroy(Playlist $playlist)
     {
-        // This can't be put into a Request authorize(), due to Laravel(?)'s limitation.
-        if (Playlist::findOrFail($id)->user_id !== auth()->user()->id) {
-            abort(403);
-        }
+        $this->authorize('owner', $playlist);
 
-        Playlist::destroy($id);
+        $playlist->delete();
 
         return response()->json();
     }

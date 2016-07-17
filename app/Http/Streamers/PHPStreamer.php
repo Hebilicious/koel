@@ -2,11 +2,13 @@
 
 namespace App\Http\Streamers;
 
-class PHPStreamer extends BaseStreamer implements StreamerInterface
+use App\Models\Song;
+
+class PHPStreamer extends Streamer implements StreamerInterface
 {
-    public function __construct($id)
+    public function __construct(Song $song)
     {
-        parent::__construct($id);
+        parent::__construct($song);
     }
 
     /**
@@ -40,18 +42,14 @@ class PHPStreamer extends BaseStreamer implements StreamerInterface
             $partial = true;
             list($param, $range) = explode('=', $range);
 
-            if (strtolower(trim($param)) != 'bytes') {
-                // Bad request - range unit is not 'bytes'
-                abort(400);
-            }
+            // Bad request - range unit is not 'bytes'
+            abort_unless(strtolower(trim($param)) === 'bytes', 400);
 
             $range = explode(',', $range);
             $range = explode('-', $range[0]); // We only deal with the first requested range
 
-            if (count($range) != 2) {
-                // Bad request - 'bytes' parameter is not valid
-                abort(400);
-            }
+            // Bad request - 'bytes' parameter is not valid
+            abort_unless(count($range) === 2, 400);
 
             if ($range[0] === '') {
                 // First number missing, return last $range[1] bytes
@@ -75,12 +73,13 @@ class PHPStreamer extends BaseStreamer implements StreamerInterface
             $length = $end - $start + 1;
         } else {
             // No range requested
+            $length = filesize($this->song->path);
             $partial = false;
         }
 
         // Send standard headers
         header("Content-Type: {$this->contentType}");
-        header("Content-Length: $fileSize");
+        header("Content-Length: $length");
         header('Content-Disposition: attachment; filename="'.basename($this->song->path).'"');
         header('Accept-Ranges: bytes');
 
@@ -89,10 +88,8 @@ class PHPStreamer extends BaseStreamer implements StreamerInterface
             header('HTTP/1.1 206 Partial Content');
             header("Content-Range: bytes $start-$end/$fileSize");
 
-            if (!$fp = fopen($this->song->path, 'r')) {
-                // Error out if we can't read the file
-                abort(500);
-            }
+            // Error out if we can't read the file
+            abort_unless($fp = fopen($this->song->path, 'r'), 500);
 
             if ($start) {
                 fseek($fp, $start);

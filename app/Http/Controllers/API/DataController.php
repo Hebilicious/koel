@@ -2,12 +2,13 @@
 
 namespace App\Http\Controllers\API;
 
+use App\Application;
 use App\Models\Artist;
 use App\Models\Interaction;
 use App\Models\Playlist;
 use App\Models\Setting;
-use App\Models\Song;
 use App\Models\User;
+use Lastfm;
 
 class DataController extends Controller
 {
@@ -27,11 +28,16 @@ class DataController extends Controller
 
         return response()->json([
             'artists' => Artist::orderBy('name')->with('albums', with('albums.songs'))->get(),
-            'settings' => Setting::all()->lists('value', 'key'),
+            'settings' => Setting::lists('value', 'key')->all(),
             'playlists' => $playlists,
             'interactions' => Interaction::byCurrentUser()->get(),
             'users' => auth()->user()->is_admin ? User::all() : [],
-            'user' => auth()->user(),
+            'currentUser' => auth()->user(),
+            'useLastfm' => Lastfm::used(),
+            'allowDownload' =>  env('ALLOW_DOWNLOAD', true),
+            'cdnUrl' => app()->staticUrl(),
+            'currentVersion' => Application::VERSION,
+            'latestVersion' => auth()->user()->is_admin ? app()->getLatestVersion() : Application::VERSION,
         ]);
     }
 }

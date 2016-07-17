@@ -1,27 +1,24 @@
-import http from '../services/http';
+import { http } from '../services';
 import stub from '../stubs/settings';
-import sharedStore from './shared';
 
-export default {
-    stub,
-    
-    state: {
-        settings: [], 
-    },
-    
-    init() {
-        this.state.settings = sharedStore.state.settings;
-    },
+export const settingStore = {
+  stub,
 
-    all() {
-        return this.state.settings;
-    },
+  state: {
+    settings: [],
+  },
 
-    update(cb = null) {
-        http.post('settings', this.all(), msg => {
-            if (cb) {
-                cb();
-            }
-        });
-    },
+  init(settings) {
+    this.state.settings = settings;
+  },
+
+  get all() {
+    return this.state.settings;
+  },
+
+  update() {
+    return new Promise((resolve, reject) => {
+      http.post('settings', this.all, data => resolve(data), r => reject(r));
+    });
+  },
 };

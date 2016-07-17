@@ -15,16 +15,20 @@ env:
   ADMIN_EMAIL: koel@example.com
   ADMIN_NAME: Koel
   ADMIN_PASSWORD: SoSecureK0el
+  LASTFM_API_KEY: foo
+  LASTFM_API_SECRET: bar
 
 branches:
-  only:
-    - master
+  - master 
 
-before_script:
+install:
+  - . $HOME/.nvm/nvm.sh
+  - nvm install stable
+  - nvm use stable
+  - npm install
   - composer self-update
   - composer install --prefer-source --no-interaction
-  - npm install
 
-script: 
+script:
   - phpunit
   - npm test
